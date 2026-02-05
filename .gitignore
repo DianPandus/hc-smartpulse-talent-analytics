@@ -48,8 +48,8 @@ venv.bak/
 .ipynb_checkpoints
 *.ipynb
 
-# Data files (large CSV files)
-data/*.csv
+# Data files (large files only)
+# data/*.csv  # Commented out to allow dataset.csv to be tracked
 data/*.xlsx
 data/*.xls
 
