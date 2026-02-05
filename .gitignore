@@ -53,11 +53,11 @@ venv.bak/
 data/*.xlsx
 data/*.xls
 
-# Model files (can be regenerated)
-models/*.pkl
-models/*.json
-models/*.png
-models/*.csv
+# Model files (needed for deployment)
+# models/*.pkl  # Uncommented to allow deployment to Streamlit Cloud
+# models/*.json
+models/*.png    # Keep visualization files ignored (can be regenerated)
+# models/*.csv  # Feature importance CSV needed for deployment
 
 # Logs
 *.log

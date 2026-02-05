@@ -816,7 +816,8 @@ def main():
         
         # Current date and stats
         today = datetime.now().strftime("%B %d, %Y")
-        st.caption(f"📅 Last Updated: {today} | 📊 Active Employees: 1,234 | 🎯 Model Accuracy: {metrics.get('accuracy', 0.87)*100:.1f}%")
+        accuracy = metrics.get('accuracy', 0.87) if metrics else 0.87
+        st.caption(f"📅 Last Updated: {today} | 📊 Active Employees: 1,234 | 🎯 Model Accuracy: {accuracy*100:.1f}%")
     
     st.markdown('<hr class="custom-divider">', unsafe_allow_html=True)
     
