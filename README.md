@@ -556,17 +556,6 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 
 ---
 
-## 👤 Author
-
-**AI/ML Engineer | Data Scientist**
-
-📧 **Contact**: [Your Email]  
-💼 **LinkedIn**: [Your Profile]  
-🐙 **GitHub**: [Your Username]  
-🌐 **Portfolio**: [Your Website]
-
----
-
 ## 🙏 Acknowledgments
 
 - **IBM Watson Analytics** - For the HR Attrition dataset
@@ -575,21 +564,6 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 - **Streamlit** - For the amazing web app framework
 - **Plotly** - For interactive visualizations
 - **scikit-learn** - For preprocessing and evaluation tools
-
----
-
-## 📸 Screenshots
-
-### Dashboard Overview
-![Dashboard](screenshots/dashboard.png)
-
-### Employee Risk Assessment
-![Risk Assessment](screenshots/risk_assessment.png)
-
-### Analytics & Feature Importance
-![Analytics](screenshots/analytics.png)
-
-> **Note**: Add screenshots to `screenshots/` directory for better documentation
 
 ---
 
