@@ -5,8 +5,13 @@ Implements XGBoost classifier with hyperparameter tuning and SHAP explainability
 
 import pandas as pd
 import numpy as np
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score, precision_score, recall_score
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.metrics import (
+    classification_report, confusion_matrix, f1_score, accuracy_score, precision_score,
+    recall_score, average_precision_score, roc_auc_score, precision_recall_curve
+)
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold, cross_val_predict, cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.dummy import DummyClassifier
 import xgboost as xgb
 import shap
 import joblib
@@ -24,6 +29,9 @@ class ModelTrainer:
         self.best_params = None
         self.shap_explainer = None
         self.shap_values = None
+        self.threshold = 0.5
+        self.cv_pr_auc = None
+        self.cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         
     def train_xgboost(self, X_train, y_train, hyperparameter_tuning=True):
         """Train XGBoost classifier with optional hyperparameter tuning"""
@@ -44,46 +52,47 @@ class ModelTrainer:
         if hyperparameter_tuning:
             print("Performing hyperparameter tuning...")
             
-            # Define parameter search space
+            # Define parameter search space (shallow trees + lower learning rates suit a small dataset)
             param_distributions = {
-                'max_depth': [3, 5, 7, 9],
-                'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                'n_estimators': [100, 200, 300],
-                'subsample': [0.8, 0.9, 1.0],
-                'colsample_bytree': [0.8, 0.9, 1.0],
+                'max_depth': [2, 3, 4, 5],
+                'learning_rate': [0.01, 0.03, 0.05, 0.1],
+                'n_estimators': [100, 200, 300, 500],
+                'subsample': [0.7, 0.8, 0.9, 1.0],
+                'colsample_bytree': [0.5, 0.7, 0.8, 1.0],
                 'min_child_weight': [1, 3, 5],
-                'gamma': [0, 0.1, 0.2]
+                'gamma': [0, 0.1, 0.3]
             }
-            
+
             # Base model
             base_model = xgb.XGBClassifier(
                 scale_pos_weight=scale_pos_weight,
                 random_state=42,
-                eval_metric='logloss',
-                use_label_encoder=False
+                eval_metric='logloss'
             )
-            
-            # Randomized search with F1-score optimization
+
+            # Optimize PR-AUC: threshold-independent and informative for an
+            # imbalanced target (unlike accuracy)
             random_search = RandomizedSearchCV(
                 estimator=base_model,
                 param_distributions=param_distributions,
-                n_iter=30,  # Number of parameter combinations to try
-                scoring='f1',  # Optimize for F1-score
-                cv=5,  # 5-fold cross-validation
+                n_iter=40,
+                scoring='average_precision',
+                cv=self.cv,
                 verbose=1,
                 random_state=42,
                 n_jobs=-1
             )
-            
+
             # Fit the model
             random_search.fit(X_train, y_train)
-            
+
             # Best model and parameters
             self.model = random_search.best_estimator_
             self.best_params = random_search.best_params_
-            
+            self.cv_pr_auc = random_search.best_score_
+
             print(f"\nBest Parameters: {self.best_params}")
-            print(f"Best CV F1-Score: {random_search.best_score_:.4f}")
+            print(f"Best CV PR-AUC: {random_search.best_score_:.4f}")
             
         else:
             # Train with default parameters
@@ -94,58 +103,109 @@ class ModelTrainer:
                 n_estimators=200,
                 scale_pos_weight=scale_pos_weight,
                 random_state=42,
-                eval_metric='logloss',
-                use_label_encoder=False
+                eval_metric='logloss'
             )
             self.model.fit(X_train, y_train)
         
         print("\nModel training complete!")
         return self.model
+
+    def tune_threshold(self, X_train, y_train):
+        """Pick the decision threshold that maximizes F1 on out-of-fold training predictions.
+
+        The test set is not used here, so the reported test metrics stay unbiased.
+        """
+        oof_proba = cross_val_predict(
+            xgb.XGBClassifier(**self.model.get_params()),
+            X_train, y_train, cv=self.cv, method='predict_proba'
+        )[:, 1]
+
+        precision, recall, thresholds = precision_recall_curve(y_train, oof_proba)
+        f1 = 2 * precision * recall / (precision + recall + 1e-12)
+        best = np.argmax(f1[:-1])
+        self.threshold = float(thresholds[best])
+
+        print(f"\nTuned decision threshold: {self.threshold:.3f} (out-of-fold F1 {f1[best]:.4f})")
+        return self.threshold
     
-    def evaluate_model(self, X_test, y_test):
+    def evaluate_model(self, X_train, y_train, X_test, y_test):
         """Evaluate model performance"""
         print("\n" + "="*50)
         print("MODEL EVALUATION")
         print("="*50 + "\n")
         
-        # Predictions
-        y_pred = self.model.predict(X_test)
+        # Predictions at the tuned threshold
         y_pred_proba = self.model.predict_proba(X_test)[:, 1]
-        
-        # Metrics
-        accuracy = accuracy_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred)
-        recall = recall_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
-        
-        print(f"Accuracy:  {accuracy:.4f}")
-        print(f"Precision: {precision:.4f}")
-        print(f"Recall:    {recall:.4f}")
-        print(f"F1-Score:  {f1:.4f}\n")
-        
+        y_pred = (y_pred_proba >= self.threshold).astype(int)
+
+        metrics = self._score(y_test, y_pred, y_pred_proba)
+        metrics['threshold'] = self.threshold
+        metrics['cv_pr_auc'] = self.cv_pr_auc
+        metrics['n_train'] = int(len(y_train))
+        metrics['n_test'] = int(len(y_test))
+
+        print(f"Decision threshold: {self.threshold:.3f}")
+        for name in ['accuracy', 'precision', 'recall', 'f1_score', 'pr_auc', 'roc_auc']:
+            print(f"  {name:10s} {metrics[name]:.4f}")
+
         # Classification report
-        print("Classification Report:")
+        print("\nClassification Report:")
         print(classification_report(y_test, y_pred, target_names=['No Attrition', 'Attrition']))
-        
+
         # Confusion matrix
         cm = confusion_matrix(y_test, y_pred)
         print("\nConfusion Matrix:")
         print(cm)
-        
+        metrics['confusion_matrix'] = cm.tolist()
+
         # Save confusion matrix plot
         self._plot_confusion_matrix(cm)
-        
-        # Save metrics
-        metrics = {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1
-        }
+
+        # Baselines put the scores in context: with 16% attrition, always predicting
+        # "No" already reaches ~84% accuracy
+        metrics['baselines'] = self._evaluate_baselines(X_train, y_train, X_test, y_test)
+
         joblib.dump(metrics, os.path.join(self.model_dir, 'model_metrics.pkl'))
-        
+
         return metrics
-    
+
+    @staticmethod
+    def _score(y_true, y_pred, y_proba):
+        return {
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(y_true, y_pred, zero_division=0),
+            'recall': recall_score(y_true, y_pred),
+            'f1_score': f1_score(y_true, y_pred),
+            'pr_auc': average_precision_score(y_true, y_proba),
+            'roc_auc': roc_auc_score(y_true, y_proba)
+        }
+
+    def _evaluate_baselines(self, X_train, y_train, X_test, y_test):
+        """Score simple reference models on the same split"""
+        baselines = {
+            'Majority class': DummyClassifier(strategy='most_frequent'),
+            'Logistic Regression': LogisticRegression(max_iter=3000, class_weight='balanced')
+        }
+
+        results = {}
+        print("\nBaselines (threshold 0.5):")
+        for name, model in baselines.items():
+            # CV score on the training set is a steadier comparison than 47 test positives
+            cv_pr_auc = cross_val_score(
+                model, X_train, y_train, cv=self.cv, scoring='average_precision'
+            ).mean()
+
+            model.fit(X_train, y_train)
+            y_proba = model.predict_proba(X_test)[:, 1]
+            results[name] = self._score(y_test, (y_proba >= 0.5).astype(int), y_proba)
+            results[name]['cv_pr_auc'] = cv_pr_auc
+            r = results[name]
+            print(f"  {name:20s} acc {r['accuracy']:.3f} | prec {r['precision']:.3f} | "
+                  f"rec {r['recall']:.3f} | F1 {r['f1_score']:.3f} | PR-AUC {r['pr_auc']:.3f} | "
+                  f"CV PR-AUC {cv_pr_auc:.3f}")
+
+        return results
+
     def _plot_confusion_matrix(self, cm):
         """Plot and save confusion matrix"""
         plt.figure(figsize=(8, 6))
@@ -237,9 +297,10 @@ def main():
     # Train model
     trainer = ModelTrainer()
     trainer.train_xgboost(X_train, y_train, hyperparameter_tuning=True)
+    trainer.tune_threshold(X_train, y_train)
     
     # Evaluate model
-    metrics = trainer.evaluate_model(X_test, y_test)
+    metrics = trainer.evaluate_model(X_train, y_train, X_test, y_test)
     
     # Compute SHAP values
     feature_importance = trainer.compute_shap_values(X_train, X_test)

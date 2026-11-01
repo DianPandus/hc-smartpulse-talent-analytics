@@ -14,33 +14,12 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
-import time
+import xgboost as xgb
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent / 'src'))
 
-try:
-    from recommendation_engine import RecommendationEngine
-except ImportError:
-    # Mock class for demo
-    class RecommendationEngine:
-        def __init__(self, risk_threshold=0.7):
-            self.risk_threshold = risk_threshold
-        
-        def get_risk_level(self, probability):
-            if probability >= 0.7:
-                return "HIGH RISK", "high"
-            elif probability >= 0.4:
-                return "MEDIUM RISK", "medium"
-            else:
-                return "LOW RISK", "low"
-        
-        def get_recommendations(self, probability, input_data):
-            return [
-                {"category": "Compensation", "action": "Review salary competitiveness", "priority": "High"},
-                {"category": "Career Growth", "action": "Discuss promotion timeline", "priority": "Medium"},
-                {"category": "Work-Life Balance", "action": "Evaluate overtime requirements", "priority": "Medium"}
-            ]
+from recommendation_engine import RecommendationEngine
 
 # Page configuration
 st.set_page_config(
@@ -49,9 +28,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        'Get Help': 'https://example.com',
-        'Report a bug': 'https://example.com',
-        'About': "### HC-SmartPulse v2.0\nAI-powered employee retention platform"
+        'Get Help': 'https://github.com/DianPandus/hc-smartpulse-talent-analytics',
+        'Report a bug': 'https://github.com/DianPandus/hc-smartpulse-talent-analytics/issues',
+        'About': "### HC-SmartPulse\nEmployee attrition risk prediction with XGBoost and SHAP"
     }
 )
 
@@ -511,77 +490,66 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+RISK_COLORS = {'high': '#ff416c', 'medium': '#ffb347', 'low': '#4facfe'}
+
+
 @st.cache_resource
 def load_models():
     """Load trained model and preprocessing artifacts"""
-    try:
-        model = joblib.load('models/xgboost_model.pkl')
-        encoders = joblib.load('models/feature_encoder.pkl')
-        scaler = joblib.load('models/scaler.pkl')
-        feature_columns = joblib.load('models/feature_columns.pkl')
-        
-        # Try to load metrics and feature importance
-        try:
-            metrics = joblib.load('models/model_metrics.pkl')
-        except:
-            metrics = {'accuracy': 0.87, 'precision': 0.85, 'recall': 0.82, 'f1_score': 0.83}
-        
-        try:
-            feature_importance = pd.read_csv('models/feature_importance.csv')
-        except:
-            # Mock feature importance for demo
-            feature_importance = pd.DataFrame({
-                'feature': ['MonthlyIncome', 'OverTime', 'JobSatisfaction', 'YearsAtCompany', 'WorkLifeBalance'],
-                'importance': [0.25, 0.18, 0.15, 0.12, 0.10]
-            })
-        
-        return model, encoders, scaler, feature_columns, metrics, feature_importance
-    except Exception as e:
-        st.warning(f"Using demo mode: {e}")
-        # Return mock data for demo
-        return None, None, None, None, None, None
+    model = joblib.load('models/xgboost_model.pkl')
+    encoders = joblib.load('models/feature_encoder.pkl')
+    scaler = joblib.load('models/scaler.pkl')
+    feature_columns = joblib.load('models/feature_columns.pkl')
+    metrics = joblib.load('models/model_metrics.pkl')
+    feature_importance = pd.read_csv('models/feature_importance.csv')
+    return model, encoders, scaler, feature_columns, metrics, feature_importance
 
-def create_animated_gauge(probability, employee_name="Employee"):
-    """Create an animated gauge chart"""
-    
-    # Determine color based on probability
-    if probability >= 0.7:
-        color = '#ff416c'
-        color_scale = [(0.0, '#4facfe'), (0.7, '#ffb347'), (1.0, '#ff416c')]
-    elif probability >= 0.4:
-        color = '#ffb347'
-        color_scale = [(0.0, '#4facfe'), (0.4, '#ffb347'), (1.0, '#ffb347')]
-    else:
-        color = '#4facfe'
-        color_scale = [(0.0, '#4facfe'), (0.4, '#4facfe'), (1.0, '#ffb347')]
-    
-    # Create gauge
+
+@st.cache_data
+def load_dataset():
+    return pd.read_csv('data/dataset.csv', encoding='utf-8-sig')
+
+
+@st.cache_data
+def score_dataset(df, _model, _encoders, _scaler, feature_columns):
+    """Add the model's predicted attrition probability to every employee record"""
+    X = encode_features(df.drop(columns=['Attrition']), _encoders, _scaler, feature_columns)
+    scored = df.copy()
+    scored['RiskScore'] = _model.predict_proba(X)[:, 1]
+    return scored
+
+
+def create_animated_gauge(probability, rec_engine, employee_name="Employee"):
+    """Create a gauge whose bands follow the active risk thresholds"""
+    high = rec_engine.risk_threshold * 100
+    medium = rec_engine.medium_threshold * 100
+    _, level = rec_engine.get_risk_level(probability)
+
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
+        mode="gauge+number",
         value=probability * 100,
         domain={'x': [0, 1], 'y': [0, 1]},
         title={'text': f"{employee_name}'s Flight Risk", 'font': {'size': 24, 'color': 'white'}},
-        delta={'reference': 50, 'increasing': {'color': "red"}, 'decreasing': {'color': "green"}},
         number={'suffix': "%", 'font': {'size': 48, 'color': 'white', 'family': "Arial, sans-serif"}},
         gauge={
             'axis': {'range': [0, 100], 'tickwidth': 2, 'tickcolor': "white", 'tickfont': {'size': 14, 'color': 'white'}},
-            'bar': {'color': color, 'thickness': 0.5},
+            'bar': {'color': RISK_COLORS[level], 'thickness': 0.5},
             'bgcolor': "white",
             'borderwidth': 2,
             'bordercolor': "gray",
             'steps': [
-                {'range': [0, 40], 'color': '#e3f2fd'},
-                {'range': [40, 70], 'color': '#fff3e0'},
-                {'range': [70, 100], 'color': '#ffebee'}
+                {'range': [0, medium], 'color': '#e3f2fd'},
+                {'range': [medium, high], 'color': '#fff3e0'},
+                {'range': [high, 100], 'color': '#ffebee'}
             ],
             'threshold': {
-                'line': {'color': "white", 'width': 4},
+                'line': {'color': "#ff416c", 'width': 4},
                 'thickness': 0.8,
-                'value': probability * 100
+                'value': high
             }
         }
     ))
-    
+
     fig.update_layout(
         height=350,
         margin=dict(l=20, r=20, t=80, b=20),
@@ -589,23 +557,26 @@ def create_animated_gauge(probability, employee_name="Employee"):
         plot_bgcolor='rgba(0,0,0,0)',
         font={'color': "white", 'family': "Arial, sans-serif"}
     )
-    
+
     return fig
 
-def create_radar_chart(input_data):
+
+def profile_scores(input_data):
+    """Rescale selected form inputs to 0-100 for the profile radar chart"""
+    return {
+        'Job Satisfaction': input_data['JobSatisfaction'] / 4 * 100,
+        'Compensation': min(input_data['MonthlyIncome'] / 20000 * 100, 100),  # form max is $20,000
+        'Promotion Recency': max(0, 1 - input_data['YearsSinceLastPromotion'] / 15) * 100,
+        'Work-Life Balance': input_data['WorkLifeBalance'] / 4 * 100,
+        'Engagement': input_data['JobInvolvement'] / 4 * 100
+    }
+
+def create_radar_chart(profile):
     """Create a radar chart for employee profile"""
-    
-    categories = ['Job Satisfaction', 'Compensation', 'Growth Potential', 'Work-Life Balance', 'Engagement']
-    
-    # Mock values based on input data (in real app, calculate these properly)
-    values = [
-        input_data.get('JobSatisfaction', 3) / 4 * 100,
-        min(input_data.get('MonthlyIncome', 5000) / 10000 * 100, 100),
-        (5 - input_data.get('YearsSinceLastPromotion', 2)) / 5 * 100,
-        input_data.get('WorkLifeBalance', 3) / 4 * 100,
-        input_data.get('JobInvolvement', 3) / 4 * 100
-    ]
-    
+
+    categories = list(profile.keys())
+    values = list(profile.values())
+
     fig = go.Figure(data=go.Scatterpolar(
         r=values,
         theta=categories,
@@ -638,13 +609,13 @@ def create_radar_chart(input_data):
     
     return fig
 
-def create_comparison_chart(employee_prob, avg_prob=0.3):
+def create_comparison_chart(employee_prob, avg_prob):
     """Create comparison chart against company average"""
     
     fig = go.Figure()
     
     fig.add_trace(go.Bar(
-        y=['This Employee', 'Company Average'],
+        y=['This Employee', 'Active Employee Avg'],
         x=[employee_prob * 100, avg_prob * 100],
         orientation='h',
         marker_color=['#4361ee', '#4cc9f0'],
@@ -675,51 +646,44 @@ def create_comparison_chart(employee_prob, avg_prob=0.3):
     
     return fig
 
-def preprocess_input(input_data, encoders, scaler, feature_columns):
-    """Preprocess user input data for prediction"""
-    
-    # Create DataFrame
-    df = pd.DataFrame([input_data])
-    
-    # Encode categorical features
+def encode_features(df, encoders, scaler, feature_columns):
+    """Apply the training-time encoding and scaling to raw employee records"""
+    df = df.copy()
+
     for col, encoder in encoders.items():
-        if col in df.columns and col != 'Attrition':
-            if df[col].dtype == 'object':
-                try:
-                    df[col] = encoder.transform(df[col])
-                except:
-                    # If value not in training data, use most frequent
-                    df[col] = encoder.transform([encoder.classes_[0]])[0]
-    
-    # Ensure all feature columns are present
-    for col in feature_columns:
-        if col not in df.columns:
-            df[col] = 0
-    
-    # Reorder columns to match training data
+        if col != 'Attrition' and col in df.columns:
+            unknown = set(df[col]) - set(encoder.classes_)
+            if unknown:
+                raise ValueError(f"Unknown {col} value(s): {sorted(unknown)}")
+            df[col] = encoder.transform(df[col])
+
+    missing = [col for col in feature_columns if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing feature(s): {missing}")
+
     df = df[feature_columns]
-    
-    # Scale numerical features
-    numerical_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    df[numerical_cols] = scaler.transform(df[numerical_cols])
-    
-    return df
+    return pd.DataFrame(scaler.transform(df), columns=feature_columns)
+
+
+def preprocess_input(input_data, encoders, scaler, feature_columns):
+    """Preprocess a single employee from the form for prediction"""
+    return encode_features(pd.DataFrame([input_data]), encoders, scaler, feature_columns)
+
 
 def main():
     """Main application with enhanced UI"""
-    
+
     # Load models
     with st.spinner('🚀 Loading AI Models...'):
-        model, encoders, scaler, feature_columns, metrics, feature_importance = load_models()
-        rec_engine = RecommendationEngine(risk_threshold=0.7)
-    
-    # Load dataset for filtering
-    @st.cache_data
-    def load_dataset():
-        return pd.read_csv('data/dataset.csv')
-    
-    df_full = load_dataset()
-    
+        try:
+            model, encoders, scaler, feature_columns, metrics, feature_importance = load_models()
+        except Exception as e:
+            st.error(f"Could not load model artifacts: {e}. "
+                     "Run `python src/model_training.py` first.")
+            st.stop()
+
+    df_full = score_dataset(load_dataset(), model, encoders, scaler, feature_columns)
+
     # ===== SIDEBAR =====
     with st.sidebar:
         st.markdown("""
@@ -729,226 +693,207 @@ def main():
             <p style="color: #666; margin: 5px 0;">Talent Retention Platform</p>
         </div>
         """, unsafe_allow_html=True)
-        
+
         st.markdown("---")
-        
-        # Quick Stats
-        st.markdown("### 📈 Quick Stats")
-        st.metric("Active Alerts", "24", "+3")
-        st.metric("Avg Risk Score", "32.5%", "-2.1%")
-        st.metric("Retention Rate", "91.5%", "+0.8%")
-        
+
+        # Risk threshold, defaulting to the one tuned during training
+        st.markdown("### 🎚️ Risk Threshold")
+        risk_threshold = st.slider(
+            "High-risk threshold",
+            0.05, 0.95, float(round(metrics['threshold'], 2)), 0.01,
+            help="Employees at or above this predicted probability are flagged as high risk. "
+                 f"The default ({metrics['threshold']:.2f}) is the F1-optimal threshold "
+                 "found with cross-validation on the training set."
+        )
+        rec_engine = RecommendationEngine(risk_threshold=risk_threshold)
+
         st.markdown("---")
-        
+
         # Filters
         st.markdown("### 🔍 Filters")
-        
+
         # Get unique departments from dataset
         available_departments = ["All"] + sorted(df_full['Department'].unique().tolist())
-        
+
         department_filter = st.multiselect(
             "Department",
             available_departments,
             default=["All"],
             help="Filter dashboard by department"
         )
-        
+
         # Attrition status filter
         attrition_filter = st.selectbox(
             "Attrition Status",
             ["All", "Active Employees", "Left Company"],
             help="Filter by employment status"
         )
-        
-        st.markdown("---")
-        
-        # Quick Actions
-        st.markdown("### ⚡ Quick Actions")
-        
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.rerun()
-        
-        if st.button("📧 Send Reports", use_container_width=True):
-            st.toast("📤 Reports sent to management team!")
-        
-        if st.button("🆕 New Analysis", use_container_width=True):
-            st.rerun()
-        
-        st.markdown("---")
-        
-        # Show filter status
-        filter_count = 0
-        if "All" not in department_filter:
-            filter_count += 1
-        if attrition_filter != "All":
-            filter_count += 1
-        
-        if filter_count > 0:
-            st.caption(f"🎯 {filter_count} filter(s) active")
-    
+
     # ===== APPLY FILTERS =====
     filtered_df = df_full.copy()
-    
+
     # Department filter
     if "All" not in department_filter:
         filtered_df = filtered_df[filtered_df['Department'].isin(department_filter)]
-    
-    # Attrition filter  
+
+    # Attrition filter
     if attrition_filter == "Active Employees":
         filtered_df = filtered_df[filtered_df['Attrition'] == 'No']
     elif attrition_filter == "Left Company":
         filtered_df = filtered_df[filtered_df['Attrition'] == 'Yes']
-    
+
     # Calculate metrics from filtered data
     total_employees = len(filtered_df)
-    attrition_count = len(filtered_df[filtered_df['Attrition'] == 'Yes'])
-    attrition_rate = (attrition_count / total_employees * 100) if total_employees > 0 else 0
-    retention_rate = 100 - attrition_rate
-    avg_monthly_income = filtered_df['MonthlyIncome'].mean() if total_employees > 0 else 0
-    
-    
+    attrition_rate = (filtered_df['Attrition'] == 'Yes').mean() * 100 if total_employees > 0 else 0
+    active_df = filtered_df[filtered_df['Attrition'] == 'No']
+    high_risk_active = int((active_df['RiskScore'] >= risk_threshold).sum())
+    avg_active_risk = df_full.loc[df_full['Attrition'] == 'No', 'RiskScore'].mean()
+
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 📈 Quick Stats")
+        st.metric("Employees", f"{total_employees:,}")
+        st.metric("Attrition Rate", f"{attrition_rate:.1f}%")
+        st.metric("High-Risk Active Employees", f"{high_risk_active:,}")
+
     # Header with animated elements
     col1, col2, col3 = st.columns([1, 2, 1])
-    
+
     with col2:
         st.markdown('<h1 class="main-header">🚀 HC-SmartPulse</h1>', unsafe_allow_html=True)
         st.markdown('<p class="sub-header">AI-Powered Talent Retention Platform</p>', unsafe_allow_html=True)
-        
-        # Current date and stats
-        today = datetime.now().strftime("%B %d, %Y")
-        accuracy = metrics.get('accuracy', 0.87) if metrics else 0.87
-        st.caption(f"📅 Last Updated: {today} | 📊 Active Employees: 1,234 | 🎯 Model Accuracy: {accuracy*100:.1f}%")
-    
+        st.caption(f"📊 Employees: {len(df_full):,} | 🎯 Model recall: {metrics['recall']*100:.1f}% | "
+                   f"F1: {metrics['f1_score']*100:.1f}% (held-out test set)")
+
     st.markdown('<hr class="custom-divider">', unsafe_allow_html=True)
-    
+
     # Main content with tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Dashboard", "👤 Employee Risk", "📈 Analytics", "⚙️ Settings"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏠 Dashboard", "👤 Employee Risk", "📈 Analytics", "📁 Export & Model Info"])
     
     with tab1:
         # Dashboard View
         st.markdown("## 📊 Executive Dashboard")
-        
-        # KPI Cards
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.markdown("""
-            <div class="metric-card">
-                <div style="font-size: 2rem;">🔴</div>
-                <div style="font-size: 2rem; font-weight: bold;">12.3%</div>
-                <div>High Risk Employees</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="metric-card" style="background: linear-gradient(135deg, #4cc9f0, #4895ef);">
-                <div style="font-size: 2rem;">🔄</div>
-                <div style="font-size: 2rem; font-weight: bold;">8.5%</div>
-                <div>Turnover Rate</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown("""
-            <div class="metric-card" style="background: linear-gradient(135deg, #134E5E, #71B280);">
-                <div style="font-size: 2rem;">💰</div>
-                <div style="font-size: 2rem; font-weight: bold;">$2.1M</div>
-                <div>Potential Savings</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col4:
-            st.markdown("""
-            <div class="metric-card" style="background: linear-gradient(135deg, #7209b7, #560bad);">
-                <div style="font-size: 2rem;">🎯</div>
-                <div style="font-size: 2rem; font-weight: bold;">83.7%</div>
-                <div>Model Accuracy</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Charts Row
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("### 📈 Risk Distribution")
-            # Mock data
-            risk_data = pd.DataFrame({
-                'Risk Level': ['Low', 'Medium', 'High'],
-                'Count': [850, 250, 134],
-                'Color': ['#4facfe', '#ffb347', '#ff416c']
-            })
-            
-            fig = px.pie(risk_data, values='Count', names='Risk Level', 
-                        color='Risk Level', color_discrete_map={
-                            'Low': '#4facfe',
-                            'Medium': '#ffb347',
-                            'High': '#ff416c'
-                        })
-            fig.update_traces(textposition='inside', textinfo='percent+label', textfont_color='white')
-            fig.update_layout(
-                showlegend=False, 
-                height=300,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font={'color': 'white'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.markdown("### 🏢 Department Analysis")
-            dept_data = pd.DataFrame({
-                'Department': ['Research & Development', 'Sales', 'Human Resources'],
-                'Risk %': [18.7, 25.3, 8.9]
-            })
-            
-            fig = px.bar(dept_data, x='Department', y='Risk %',
-                        color='Risk %', color_continuous_scale='Blues')
-            fig.update_layout(
-                height=300,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                xaxis=dict(
-                    tickfont_color='white',
-                    title_font_color='white'
-                ),
-                yaxis=dict(
-                    tickfont_color='white',
-                    title_font_color='white',
-                    gridcolor='rgba(255,255,255,0.1)'
-                ),
-                font={'color': 'white'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Recent High-Risk Employees
-        st.markdown("### 🔥 Recent High-Risk Alerts")
-        
-        high_risk_employees = [
-            {"name": "Sarah Johnson", "role": "Research Scientist", "risk": 85, "department": "Research & Development"},
-            {"name": "Michael Chen", "role": "Sales Manager", "risk": 78, "department": "Sales"},
-            {"name": "Emma Wilson", "role": "Sales Executive", "risk": 72, "department": "Sales"},
-            {"name": "David Brown", "role": "HR Specialist", "risk": 68, "department": "Human Resources"}
-        ]
-        
-        for emp in high_risk_employees:
-            risk_color = "risk-high" if emp["risk"] >= 70 else "risk-medium"
-            with st.container():
+        st.caption("Risk scores are model predictions for the historical IBM HR dataset. These records "
+                   "include the training data, so the dashboard demonstrates the workflow rather than "
+                   "an out-of-sample forecast.")
+
+        if total_employees == 0:
+            st.warning("No employees match the selected filters.")
+        else:
+            # KPI Cards
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div style="font-size: 2rem;">🔴</div>
+                    <div style="font-size: 2rem; font-weight: bold;">{high_risk_active:,}</div>
+                    <div>High-Risk Active Employees</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card" style="background: linear-gradient(135deg, #4cc9f0, #4895ef);">
+                    <div style="font-size: 2rem;">🔄</div>
+                    <div style="font-size: 2rem; font-weight: bold;">{attrition_rate:.1f}%</div>
+                    <div>Attrition Rate</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col3:
+                st.markdown(f"""
+                <div class="metric-card" style="background: linear-gradient(135deg, #134E5E, #71B280);">
+                    <div style="font-size: 2rem;">📊</div>
+                    <div style="font-size: 2rem; font-weight: bold;">{filtered_df['RiskScore'].mean()*100:.1f}%</div>
+                    <div>Avg Predicted Risk</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col4:
+                st.markdown(f"""
+                <div class="metric-card" style="background: linear-gradient(135deg, #7209b7, #560bad);">
+                    <div style="font-size: 2rem;">🎯</div>
+                    <div style="font-size: 2rem; font-weight: bold;">{metrics['recall']*100:.1f}%</div>
+                    <div>Model Recall (test set)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Charts Row
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### 📈 Risk Distribution")
+                risk_levels = filtered_df['RiskScore'].apply(lambda p: rec_engine.get_risk_level(p)[0])
+                risk_data = (risk_levels.value_counts()
+                             .reindex(['Low Risk', 'Medium Risk', 'High Risk'], fill_value=0)
+                             .rename_axis('Risk Level').reset_index(name='Count'))
+
+                fig = px.pie(risk_data, values='Count', names='Risk Level',
+                            color='Risk Level', color_discrete_map={
+                                'Low Risk': RISK_COLORS['low'],
+                                'Medium Risk': RISK_COLORS['medium'],
+                                'High Risk': RISK_COLORS['high']
+                            })
+                fig.update_traces(textposition='inside', textinfo='percent+label', textfont_color='white')
+                fig.update_layout(
+                    showlegend=False,
+                    height=300,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font={'color': 'white'}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col2:
+                st.markdown("### 🏢 Attrition Rate by Department")
+                dept_data = (filtered_df.assign(Left=filtered_df['Attrition'].eq('Yes'))
+                             .groupby('Department')['Left'].mean().mul(100).round(1)
+                             .rename('Attrition %').reset_index())
+
+                fig = px.bar(dept_data, x='Department', y='Attrition %',
+                            color='Attrition %', color_continuous_scale='Blues')
+                fig.update_layout(
+                    height=300,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    xaxis=dict(
+                        tickfont_color='white',
+                        title_font_color='white'
+                    ),
+                    yaxis=dict(
+                        tickfont_color='white',
+                        title_font_color='white',
+                        gridcolor='rgba(255,255,255,0.1)'
+                    ),
+                    font={'color': 'white'}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Active employees the model ranks highest
+            st.markdown("### 🔥 Active Employees with the Highest Predicted Risk")
+
+            watchlist = active_df.nlargest(5, 'RiskScore')
+            if watchlist.empty:
+                st.info("No active employees in the current filter.")
+
+            for _, emp in watchlist.iterrows():
+                _, level = rec_engine.get_risk_level(emp['RiskScore'])
                 st.markdown(f"""
                 <div class="employee-card">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <div>
-                            <h4 style="margin: 0;">{emp['name']}</h4>
-                            <p style="margin: 5px 0; color: #666;">{emp['role']} • {emp['department']}</p>
+                            <h4 style="margin: 0;">Employee #{emp['EmployeeNumber']}</h4>
+                            <p style="margin: 5px 0; color: #666;">{emp['JobRole']} • {emp['Department']}</p>
                         </div>
-                        <span class="risk-badge {risk_color}">{emp['risk']}% Risk</span>
+                        <span class="risk-badge risk-{level}">{emp['RiskScore']*100:.0f}% Risk</span>
                     </div>
                     <div style="margin-top: 10px;">
-                        <small>📅 Last review: 2 days ago • 🎯 Priority: High</small>
+                        <small>🕐 Overtime: {emp['OverTime']} • 💼 {emp['YearsAtCompany']} yrs at company • 😊 Job satisfaction {emp['JobSatisfaction']}/4</small>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-    
+
     with tab2:
         # Employee Risk Assessment
         st.markdown("## 👤 Employee Risk Assessment")
@@ -1048,7 +993,6 @@ def main():
         with predict_col2:
             if st.button("🎯 Analyze Flight Risk", type="primary", use_container_width=True):
                 with st.spinner('🤖 Analyzing employee data...'):
-                    time.sleep(1.5)
                     
                     # Prepare input data dictionary
                     input_data = {
@@ -1084,296 +1028,249 @@ def main():
                         'PercentSalaryHike': percent_salary_hike
                     }
                     
-                    # Make actual prediction if model is loaded
-                    if model is not None:
-                        try:
-                            processed_data = preprocess_input(input_data, encoders, scaler, feature_columns)
-                            probability = model.predict_proba(processed_data)[0][1]
-                        except Exception as e:
-                            st.error(f"Prediction error: {e}")
-                            probability = np.random.uniform(0.1, 0.9)  # Fallback
-                    else:
-                        # Fallback to mock prediction if model not loaded
-                        probability = np.random.uniform(0.1, 0.9)
-                    
+                    # Predict with the trained model; never show a made-up score
+                    try:
+                        processed_data = preprocess_input(input_data, encoders, scaler, feature_columns)
+                        probability = float(model.predict_proba(processed_data)[0][1])
+                    except Exception as e:
+                        st.error(f"Prediction failed: {e}")
+                        st.stop()
+
                     # Display results with animation
                     st.markdown('<div class="fade-in">', unsafe_allow_html=True)
-                    
+
                     # Results Header
                     st.markdown("---")
                     st.markdown(f"## 📊 Analysis Results for {employee_name or 'Employee'}")
-                    
+
                     # Risk Visualization in columns
                     viz_col1, viz_col2 = st.columns([2, 1])
-                    
+
                     with viz_col1:
                         # Gauge Chart
-                        st.plotly_chart(create_animated_gauge(probability, employee_name), 
+                        st.plotly_chart(create_animated_gauge(probability, rec_engine, employee_name or "Employee"),
                                       use_container_width=True)
-                    
+
                     with viz_col2:
                         # Risk Badge and Stats
-                        risk_level, color = rec_engine.get_risk_level(probability)
-                        
+                        risk_level, level = rec_engine.get_risk_level(probability)
+
                         st.markdown(f"""
                         <div style="text-align: center; padding: 20px;">
-                            <div class="risk-badge risk-{color}" style="font-size: 1.2rem; min-width: 150px; margin: 0 auto;">
+                            <div class="risk-badge risk-{level}" style="font-size: 1.2rem; min-width: 150px; margin: 0 auto;">
                                 {risk_level}
                             </div>
-                            <div style="font-size: 3rem; font-weight: bold; margin: 20px 0; color: {'#ff416c' if probability >= 0.7 else '#ffb347' if probability >= 0.4 else '#4facfe'}">
+                            <div style="font-size: 3rem; font-weight: bold; margin: 20px 0; color: {RISK_COLORS[level]}">
                                 {probability*100:.1f}%
                             </div>
                             <div style="color: #666;">
-                                Probability of leaving within 6 months
+                                Predicted attrition probability
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
-                        
+
                         # Comparison chart
-                        st.plotly_chart(create_comparison_chart(probability), 
+                        st.plotly_chart(create_comparison_chart(probability, avg_active_risk),
                                       use_container_width=True)
-                    
+
                     # Radar Chart for Profile
                     st.markdown("### 🎯 Employee Profile Snapshot")
                     radar_col1, radar_col2 = st.columns([1, 2])
-                    
+                    profile = profile_scores(input_data)
+
                     with radar_col1:
-                        st.markdown("""
+                        strongest = max(profile, key=profile.get)
+                        weakest = min(profile, key=profile.get)
+                        st.markdown(f"""
                         #### Key Insights:
-                        - **Strengths**: Good work-life balance
-                        - **Concerns**: Compensation competitiveness
-                        - **Opportunity**: Career growth path
-                        - **Threat**: High overtime hours
+                        - **Strongest area**: {strongest} ({profile[strongest]:.0f}/100)
+                        - **Weakest area**: {weakest} ({profile[weakest]:.0f}/100)
+                        - **Overtime**: {input_data['OverTime']}
                         """)
-                    
+                        st.caption("Profile scores are the form inputs rescaled to 0-100, not model outputs.")
+
                     with radar_col2:
-                        # Use the input_data dict created above for radar chart
-                        st.plotly_chart(create_radar_chart(input_data), 
+                        st.plotly_chart(create_radar_chart(profile),
                                       use_container_width=True)
-                    
+
                     # Recommendations
                     st.markdown("### 💡 Action Plan & Recommendations")
-                    
+
                     recommendations = rec_engine.get_recommendations(probability, input_data)
-                    
+
                     for i, rec in enumerate(recommendations, 1):
-                        icon = "🔴" if rec["priority"] == "High" else "🟡" if rec["priority"] == "Medium" else "🟢"
-                        
+                        icon = "🔴" if rec["priority"] in ("Critical", "High") else "🟡" if rec["priority"] == "Medium" else "🟢"
+
                         with st.expander(f"{icon} {rec['category']} ({rec['priority']} Priority)", expanded=True if i == 1 else False):
                             st.success(rec["action"])
-                            col_a, col_b = st.columns(2)
-                            with col_a:
-                                st.button(f"✅ Mark Complete", key=f"complete_{i}", 
-                                         help=f"Mark {rec['category']} as completed")
-                            with col_b:
-                                st.button(f"📅 Schedule Follow-up", key=f"schedule_{i}",
-                                         help=f"Schedule follow-up for {rec['category']}")
-                    
+
                     st.markdown('</div>', unsafe_allow_html=True)
-    
+
     with tab3:
         # Analytics Page
         st.markdown("## 📈 Advanced Analytics")
-        
+
         # Feature Importance
-        if feature_importance is not None:
-            st.markdown("### 🔍 Top Factors Influencing Attrition")
-            
-            fig = px.bar(feature_importance.head(10), 
-                        x='importance', 
-                        y='feature',
-                        orientation='h',
-                        color='importance',
-                        color_continuous_scale='Viridis',
-                        title='Feature Importance Analysis')
-            
-            fig.update_layout(
-                height=400,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
+        st.markdown("### 🔍 Top Factors Influencing Attrition")
+
+        fig = px.bar(feature_importance.head(10).sort_values('importance'),
+                    x='importance',
+                    y='feature',
+                    orientation='h',
+                    color='importance',
+                    color_continuous_scale='Viridis',
+                    title='Mean |SHAP value| on the test set')
+
+        fig.update_layout(
+            height=400,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            title_font_color='white',
+            xaxis=dict(
+                tickfont_color='white',
                 title_font_color='white',
-                xaxis=dict(
-                    tickfont_color='white',
-                    title_font_color='white',
-                    gridcolor='rgba(255,255,255,0.1)'
-                ),
-                yaxis=dict(
-                    tickfont_color='white',
-                    title_font_color='white'
-                ),
-                font={'color': 'white'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
+                gridcolor='rgba(255,255,255,0.1)'
+            ),
+            yaxis=dict(
+                tickfont_color='white',
+                title_font_color='white'
+            ),
+            font={'color': 'white'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
         # Model Performance Metrics
-        st.markdown("### 🎯 Model Performance")
-        
-        if metrics:
-            col1, col2, col3, col4 = st.columns(4)
-            metrics_display = [
-                ("Accuracy", metrics.get('accuracy', 0), "#4361ee"),
-                ("Precision", metrics.get('precision', 0), "#4cc9f0"),
-                ("Recall", metrics.get('recall', 0), "#f72585"),
-                ("F1-Score", metrics.get('f1_score', 0), "#7209b7")
-            ]
-            
-            for (name, value, color), col in zip(metrics_display, [col1, col2, col3, col4]):
-                with col:
-                    st.markdown(f"""
-                    <div style="text-align: center; padding: 20px; background: rgba(255, 255, 255, 0.05); border-radius: 15px; box-shadow: 0 5px 15px rgba(75, 48, 97, 0.3); border: 1px solid rgba(209, 196, 233, 0.1);">
-                        <div style="font-size: 1.5rem; font-weight: bold; color: {color};">
-                            {value*100:.1f}%
-                        </div>
-                        <div style="color: white; margin-top: 5px;">
-                            {name}
-                        </div>
+        st.markdown("### 🎯 Model Performance (held-out test set)")
+        st.caption(f"{metrics['n_test']} test employees, decision threshold {metrics['threshold']:.2f} "
+                   "(tuned with cross-validation on the training set only).")
+
+        col1, col2, col3, col4 = st.columns(4)
+        metrics_display = [
+            ("Recall", metrics['recall'], "#f72585"),
+            ("Precision", metrics['precision'], "#4cc9f0"),
+            ("F1-Score", metrics['f1_score'], "#7209b7"),
+            ("PR-AUC", metrics['pr_auc'], "#4361ee")
+        ]
+
+        for (name, value, color), col in zip(metrics_display, [col1, col2, col3, col4]):
+            with col:
+                st.markdown(f"""
+                <div style="text-align: center; padding: 20px; background: rgba(255, 255, 255, 0.05); border-radius: 15px; box-shadow: 0 5px 15px rgba(75, 48, 97, 0.3); border: 1px solid rgba(209, 196, 233, 0.1);">
+                    <div style="font-size: 1.5rem; font-weight: bold; color: {color};">
+                        {value*100:.1f}%
                     </div>
-                    """, unsafe_allow_html=True)
-    
+                    <div style="color: white; margin-top: 5px;">
+                        {name}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Baselines
+        st.markdown("### ⚖️ Comparison with Baselines")
+        rows = [{'Model': f"XGBoost (threshold {metrics['threshold']:.2f})", **metrics}]
+        rows += [{'Model': f"{name} (threshold 0.50)", **scores} for name, scores in metrics['baselines'].items()]
+        columns = {'accuracy': 'Accuracy', 'precision': 'Precision', 'recall': 'Recall',
+                   'f1_score': 'F1', 'pr_auc': 'PR-AUC', 'cv_pr_auc': 'CV PR-AUC'}
+        comparison = pd.DataFrame(rows).set_index('Model')[list(columns)].rename(columns=columns)
+        st.dataframe(comparison.style.format('{:.1%}'), use_container_width=True)
+        st.caption("Accuracy is misleading on this dataset: predicting \"No\" for everyone already scores "
+                   "~84%. Compare models on recall, F1 and PR-AUC. CV PR-AUC is the 5-fold "
+                   "cross-validated score on the training set.")
+
+        # Confusion matrix
+        st.markdown("### 🧮 Confusion Matrix (test set)")
+        fig = px.imshow(metrics['confusion_matrix'], text_auto=True, color_continuous_scale='Purples',
+                        x=['Predicted: Stay', 'Predicted: Leave'], y=['Actual: Stay', 'Actual: Leave'])
+        fig.update_layout(
+            height=350,
+            coloraxis_showscale=False,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font={'color': 'white'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
     with tab4:
-        # Settings Page
-        st.markdown("## ⚙️ Settings & Configuration")
-        
+        st.markdown("## 📁 Export & Model Info")
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
-            st.markdown("### 🔧 Model Settings")
-            
-            risk_threshold = st.slider("High Risk Threshold", 0.0, 1.0, 0.7, 0.05)
-            confidence_level = st.slider("Confidence Level", 0.8, 0.99, 0.95, 0.01)
-            
-            st.markdown("### 📊 Data Sources")
-            sources = st.multiselect(
-                "Integration Sources",
-                ["HRIS System", "Performance Reviews", "Employee Surveys", 
-                 "Attendance Records", "Project Management"],
-                default=["HRIS System", "Performance Reviews"]
+            st.markdown("### 📥 Export Employee Risk Scores")
+
+            export_departments = st.multiselect(
+                "Department",
+                ["All"] + sorted(df_full['Department'].unique().tolist()),
+                default=["All"],
+                help="Select departments to include in export"
             )
-        
+
+            export_attrition = st.selectbox(
+                "Attrition Status",
+                ["All", "Yes - Left Company", "No - Still Active"],
+                help="Filter by employee attrition status"
+            )
+
+            export_job_role = st.multiselect(
+                "Job Role (optional)",
+                ["All"] + sorted(df_full['JobRole'].unique().tolist()),
+                default=["All"],
+                help="Optionally filter by specific job roles"
+            )
+
+            export_format = st.radio("Export Format", ["CSV", "Excel"], horizontal=True)
+
+            df_export = df_full.copy()
+            if "All" not in export_departments:
+                df_export = df_export[df_export['Department'].isin(export_departments)]
+            if export_attrition != "All":
+                attrition_value = "Yes" if "Yes" in export_attrition else "No"
+                df_export = df_export[df_export['Attrition'] == attrition_value]
+            if "All" not in export_job_role:
+                df_export = df_export[df_export['JobRole'].isin(export_job_role)]
+
+            if df_export.empty:
+                st.error("❌ No data matches the selected filters. Please adjust your filters.")
+            else:
+                st.info(f"📊 {len(df_export):,} of {len(df_full):,} employees selected, "
+                        "including the predicted RiskScore column.")
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+                if export_format == "CSV":
+                    st.download_button(
+                        label="💾 Download CSV",
+                        data=df_export.to_csv(index=False).encode('utf-8'),
+                        file_name=f"employee_risk_{timestamp}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                else:
+                    from io import BytesIO
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df_export.to_excel(writer, sheet_name='Employee Risk', index=False)
+                    st.download_button(
+                        label="💾 Download Excel",
+                        data=output.getvalue(),
+                        file_name=f"employee_risk_{timestamp}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+
         with col2:
-            st.markdown("### 👥 User Preferences")
-            
-            notifications = st.checkbox("🔔 Enable Email Notifications", True)
-            if notifications:
-                st.select_slider("Notification Frequency", 
-                                options=["Real-time", "Daily", "Weekly", "Monthly"],
-                                value="Daily")
-            
-            st.markdown("### 📁 Export Options")
-            
-            # Export Filters
-            st.markdown("#### 🔍 Filter Data")
-            
-            filter_col1, filter_col2 = st.columns(2)
-            
-            with filter_col1:
-                export_departments = st.multiselect(
-                    "Department",
-                    ["All", "Sales", "Research & Development", "Human Resources"],
-                    default=["All"],
-                    help="Select departments to include in export"
-                )
-                
-                export_attrition = st.selectbox(
-                    "Attrition Status",
-                    ["All", "Yes - Left Company", "No - Still Active"],
-                    help="Filter by employee attrition status"
-                )
-            
-            with filter_col2:
-                export_job_role = st.multiselect(
-                    "Job Role (optional)",
-                    ["All", "Sales Executive", "Research Scientist", "Laboratory Technician",
-                     "Manufacturing Director", "Healthcare Representative", "Manager",
-                     "Sales Representative", "Research Director", "Human Resources"],
-                    default=["All"],
-                    help="Optionally filter by specific job roles"
-                )
-            
-            st.markdown("---")
-            
-            export_format = st.radio("Export Format", ["CSV", "Excel", "PDF"], horizontal=True)
-            
-            if st.button("📥 Export Current Data", use_container_width=True):
-                # Load the actual dataset for export
-                try:
-                    df_export = pd.read_csv("data/dataset.csv")
-                    original_count = len(df_export)
-                    
-                    # Apply filters
-                    # 1. Department filter
-                    if "All" not in export_departments:
-                        df_export = df_export[df_export['Department'].isin(export_departments)]
-                    
-                    # 2. Attrition filter
-                    if export_attrition != "All":
-                        attrition_value = "Yes" if "Yes" in export_attrition else "No"
-                        df_export = df_export[df_export['Attrition'] == attrition_value]
-                    
-                    # 3. Job Role filter
-                    if "All" not in export_job_role:
-                        df_export = df_export[df_export['JobRole'].isin(export_job_role)]
-                    
-                    filtered_count = len(df_export)
-                    
-                    # Check if any data remains after filtering
-                    if filtered_count == 0:
-                        st.error("❌ No data matches the selected filters. Please adjust your filters.")
-                    else:
-                        # Show filter results
-                        if filtered_count < original_count:
-                            st.info(f"🔍 Filtered: {filtered_count} of {original_count} employees ({filtered_count/original_count*100:.1f}%)")
-                        else:
-                            st.info(f"📊 Exporting all {original_count} employees (no filters applied)")
-                        
-                        
-                        if export_format == "CSV":
-                            csv_data = df_export.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                label="💾 Download CSV",
-                                data=csv_data,
-                                file_name=f"employee_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                mime="text/csv",
-                                use_container_width=True
-                            )
-                            st.success(f"✅ CSV file ready for download! ({len(df_export)} rows)")
-                            
-                        elif export_format == "Excel":
-                            # Create Excel file in memory
-                            from io import BytesIO
-                            output = BytesIO()
-                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                df_export.to_excel(writer, sheet_name='Employee Data', index=False)
-                            excel_data = output.getvalue()
-                            
-                            st.download_button(
-                                label="💾 Download Excel",
-                                data=excel_data,
-                                file_name=f"employee_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
-                            st.success(f"✅ Excel file ready for download! ({len(df_export)} rows)")
-                            
-                        elif export_format == "PDF":
-                            st.info("📄 PDF export coming soon! Please use CSV or Excel for now.")
-                        
-                except Exception as e:
-                    st.error(f"❌ Export failed: {str(e)}")
-        
-        st.markdown("---")
-        st.markdown("### 🛠️ System Information")
-        
-        sys_info = {
-            "Version": "HC-SmartPulse v2.0",
-            "Last Updated": today,
-            "Model Version": "XGBoost v1.4.2",
-            "Active Users": "24",
-            "Data Points": "45,678"
-        }
-        
-        for key, value in sys_info.items():
-            st.markdown(f"<p style='color: white; margin: 5px 0;'>• {key}: {value}</p>", unsafe_allow_html=True)
+            st.markdown("### 🛠️ Model Information")
+
+            model_info = {
+                "Model": "XGBoost classifier",
+                "XGBoost version": xgb.__version__,
+                "Training / test employees": f"{metrics['n_train']:,} / {metrics['n_test']:,}",
+                "Tuned decision threshold": f"{metrics['threshold']:.3f}",
+                "Cross-validated PR-AUC": f"{metrics['cv_pr_auc']:.3f}",
+                "Test ROC-AUC": f"{metrics['roc_auc']:.3f}"
+            }
+
+            for key, value in model_info.items():
+                st.markdown(f"<p style='color: white; margin: 5px 0;'>• {key}: {value}</p>", unsafe_allow_html=True)
 
 # Sidebar
 

@@ -24,7 +24,8 @@ class DataProcessor:
     def load_data(self):
         """Load the dataset"""
         print(f"Loading data from {self.data_path}...")
-        self.df = pd.read_csv(self.data_path)
+        # utf-8-sig strips the BOM so the first column is read as 'Age', not '﻿Age'
+        self.df = pd.read_csv(self.data_path, encoding='utf-8-sig')
         print(f"Dataset loaded: {self.df.shape[0]} rows, {self.df.shape[1]} columns")
         return self.df
     

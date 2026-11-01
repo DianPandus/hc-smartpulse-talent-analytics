@@ -10,14 +10,18 @@ from typing import List, Dict, Tuple
 class RecommendationEngine:
     """Generate personalized HR recommendations based on attrition risk and employee profile"""
     
-    def __init__(self, risk_threshold=0.7):
+    def __init__(self, risk_threshold=0.5):
         """
         Initialize recommendation engine
-        
+
         Args:
-            risk_threshold: Probability threshold to consider an employee as high risk
+            risk_threshold: Probability threshold to consider an employee as high risk.
+                Use the model's tuned decision threshold so "high risk" matches the
+                employees the model actually flags.
         """
         self.risk_threshold = risk_threshold
+        # Medium tier: within half the distance to the high-risk threshold
+        self.medium_threshold = risk_threshold / 2
     
     def get_recommendations(self, 
                            risk_probability: float,
@@ -173,14 +177,14 @@ class RecommendationEngine:
             risk_probability: Predicted attrition probability (0-1)
             
         Returns:
-            Tuple of (risk_level, color_code)
+            Tuple of (risk_level, css_level) where css_level is 'high', 'medium' or 'low'
         """
-        if risk_probability >= 0.7:
-            return ('High Risk', 'red')
-        elif risk_probability >= 0.4:
-            return ('Medium Risk', 'orange')
+        if risk_probability >= self.risk_threshold:
+            return ('High Risk', 'high')
+        elif risk_probability >= self.medium_threshold:
+            return ('Medium Risk', 'medium')
         else:
-            return ('Low Risk', 'green')
+            return ('Low Risk', 'low')
     
     def format_recommendations_text(self, recommendations: List[Dict[str, str]]) -> str:
         """
@@ -207,7 +211,7 @@ class RecommendationEngine:
 
 def test_recommendation_engine():
     """Test the recommendation engine with sample data"""
-    engine = RecommendationEngine(risk_threshold=0.7)
+    engine = RecommendationEngine(risk_threshold=0.55)
     
     # Test case 1: High risk with overtime
     print("Test Case 1: High Risk + Overtime")

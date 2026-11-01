@@ -46,18 +46,12 @@ venv.bak/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-*.ipynb
 
-# Data files (large files only)
-# data/*.csv  # Commented out to allow dataset.csv to be tracked
+# Data files (data/dataset.csv is tracked)
 data/*.xlsx
 data/*.xls
 
-# Model files (needed for deployment)
-# models/*.pkl  # Uncommented to allow deployment to Streamlit Cloud
-# models/*.json
-models/*.png    # Keep visualization files ignored (can be regenerated)
-# models/*.csv  # Feature importance CSV needed for deployment
+# Model artifacts in models/ are tracked so the app can be deployed without retraining
 
 # Logs
 *.log
